@@ -1,0 +1,187 @@
+from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QMessageBox
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPalette
+from PyQt6.QtCore import QTimer
+import cv2
+import torch
+import numpy as np
+import sys
+from yolov5.models.common import DetectMultiBackend
+from yolov5.utils.general import non_max_suppression, scale_boxes
+from yolov5.utils.plots import Annotator, colors
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import matplotlib.pyplot as plt
+import winsound  # For Windows sound notifications
+# or
+# import pygame  # For cross-platform sound notifications
+
+class CrowdMonitoringApp(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        # UI Setup
+        self.setWindowTitle("Crowd Monitoring System")
+        self.setGeometry(100, 100, 1280, 720)  # Set window size to 1280x720
+
+        # Video Feed Layout
+        self.video_label = QLabel(self)
+        self.video_label.setFixedSize(1280, 720)  # Full resolution for video
+
+        # Labels for Crowd Density, Movement Speed, and Risk Level
+        self.density_label = QLabel("Crowd Density: 0 people/m²", self)
+        self.movement_label = QLabel("Movement Speed: 0.00", self)
+        self.risk_label = QLabel("Risk Level: LOW", self)
+
+        # Graph Setup (Rectangular Canvas)
+        self.fig, self.ax = plt.subplots(figsize=(6, 3))  # Make the graph rectangular
+        self.canvas = FigureCanvas(self.fig)
+        self.canvas.setFixedSize(600, 300)  # Fixed size for the graph
+
+        # Set graph background color to light gray for better contrast
+        self.canvas.setStyleSheet("background-color: lightgray; border-radius: 10px;")
+
+        # Layout setup for the UI
+        layout = QVBoxLayout()
+        video_layout = QVBoxLayout()
+        video_layout.addWidget(self.video_label)
+
+        # Create a layout for labels and graph
+        corner_layout = QVBoxLayout()
+        corner_layout.addWidget(self.density_label)
+        corner_layout.addWidget(self.movement_label)
+        corner_layout.addWidget(self.risk_label)
+
+        # Create a layout for the graph in the corner
+        graph_layout = QVBoxLayout()
+        graph_layout.addWidget(self.canvas)
+
+        # Place the graph and labels layout in a corner
+        corner_layout.addLayout(graph_layout)
+
+        # Main layout combining video and corner layouts
+        h_layout = QHBoxLayout()
+        h_layout.addLayout(video_layout)
+        h_layout.addLayout(corner_layout)
+
+        self.setLayout(h_layout)
+
+        # Load YOLOv5 model
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = DetectMultiBackend("yolov5s.pt", device=self.device)
+        self.model.eval()
+
+        # Video Capture
+        self.cap = cv2.VideoCapture(0)
+        self.prev_gray = None
+
+        # Timer for video updates
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_frame)
+        self.timer.start(30)  # 30ms per frame (smooth video)
+
+        # Data for graph
+        self.density_data = []
+        self.movement_data = []
+
+        # Flag to prevent multiple alerts
+        self.alert_triggered = False
+
+    def play_alert_sound(self):
+        if sys.platform == "win32":
+            winsound.Beep(1000, 500)  # Beep with frequency 1000Hz for 500ms (Windows)
+        else:
+            import pygame
+            pygame.mixer.init()
+            sound = pygame.mixer.Sound("alert_sound.wav")  # Use a WAV sound file
+            sound.play()
+
+    def show_alert_message(self):
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setText("High Risk Alert: The crowd density and movement indicate a potential risk!")
+        msg.setWindowTitle("Crowd Risk Alert")
+        msg.exec()
+
+    def update_frame(self):
+        ret, frame = self.cap.read()
+        if not ret:
+            return
+
+        # YOLOv5 Processing
+        img = cv2.resize(frame, (640, 640))
+        img = img[:, :, ::-1].transpose(2, 0, 1)
+        img = np.ascontiguousarray(img)
+        img = torch.from_numpy(img).float() / 255.0
+        img = img.unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            pred = self.model(img)
+
+        pred = non_max_suppression(pred, conf_thres=0.4, iou_thres=0.5)
+        annotator = Annotator(frame, line_width=2, example="Person Detection")
+
+        person_count = 0
+        for det in pred:
+            if det is not None and len(det):
+                det[:, :4] = scale_boxes(img.shape[2:], det[:, :4], frame.shape).round()
+                for *xyxy, conf, cls in det:
+                    if int(cls) == 0:  # Only detect "person"
+                        annotator.box_label(xyxy, f"Person {conf:.2f}", color=colors(int(cls), True))
+                        person_count += 1
+
+        # Calculate Crowd Density
+        frame_area = frame.shape[0] * frame.shape[1]
+        crowd_density = person_count / (frame_area / 1e6)
+        self.density_data.append(crowd_density)
+
+        # Optical Flow for Movement Analysis
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        movement_score = 0
+
+        if self.prev_gray is not None:
+            flow = cv2.calcOpticalFlowFarneback(self.prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+            mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            movement_score = np.mean(mag)
+            self.movement_data.append(movement_score)
+
+        self.prev_gray = gray
+
+        # Risk Assessment
+        risk_level = "LOW"
+        if crowd_density > 3.5:
+            risk_level = "MODERATE"
+            if movement_score > 2.0:
+                risk_level = "HIGH"
+                if not self.alert_triggered:
+                    self.play_alert_sound()  # Trigger sound when risk is HIGH
+                    self.show_alert_message()  # Show popup message alert
+                    self.alert_triggered = True
+
+        # Update UI Labels
+        self.density_label.setText(f"Crowd Density: {crowd_density:.2f} people/m²")
+        self.movement_label.setText(f"Movement Speed: {movement_score:.2f}")
+        self.risk_label.setText(f"Risk Level: {risk_level}")
+
+        # Update Video Feed
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = frame.shape
+        qimg = QImage(frame.data, w, h, ch * w, QImage.Format.Format_RGB888)
+        self.video_label.setPixmap(QPixmap.fromImage(qimg))
+
+        # Update Graph
+        self.update_graph()
+
+    def update_graph(self):
+        self.ax.clear()
+        self.ax.plot(self.density_data, label="Crowd Density", color="blue")
+        self.ax.plot(self.movement_data, label="Movement Intensity", linestyle="dashed", color="red")
+        self.ax.set_title("Crowd Risk Analysis")
+        self.ax.set_xlabel("Time (seconds)")
+        self.ax.set_ylabel("Value")
+        self.ax.legend()
+        self.canvas.draw()  # Redraw graph inside PyQt UI
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = CrowdMonitoringApp()
+    window.show()
+    sys.exit(app.exec())
