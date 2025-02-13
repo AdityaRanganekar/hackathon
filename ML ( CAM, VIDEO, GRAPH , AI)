@@ -1,181 +1,187 @@
-from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QMessageBox
-from PyQt6.QtGui import QImage, QPixmap
-from PyQt6.QtCore import QTimer
+import streamlit as st
 import cv2
 import torch
 import numpy as np
-import sys
+import time
+import tempfile
+import pygame
+import smtplib
+import matplotlib.pyplot as plt
+import seaborn as sns
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from yolov5.models.common import DetectMultiBackend
 from yolov5.utils.general import non_max_suppression, scale_boxes
 from yolov5.utils.plots import Annotator, colors
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-import matplotlib.pyplot as plt
-import winsound  # For Windows sound notifications
-# or
-# import pygame  # For cross-platform sound notifications
 
-class CrowdMonitoringApp(QWidget):
-    def __init__(self):
-        super().__init__()
+# Load YOLOv5 model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = DetectMultiBackend("yolov5s.pt", device=device)
+model.eval()
 
-        # UI Setup
-        self.setWindowTitle("Crowd Monitoring System")
-        self.setGeometry(100, 100, 1280, 720)  # Set window size to 1280x720
+# Streamlit UI Setup
+st.title("🔍 AI-Powered Crowd Monitoring System")
+st.sidebar.header("📁 Upload Video or Use Webcam")
+use_webcam = st.sidebar.checkbox("Use Live Webcam 📹")
+uploaded_file = st.sidebar.file_uploader("Choose a video file...", type=["mp4", "avi", "mov"])
+fps_display = st.sidebar.slider("FPS Display Speed", 1, 30, 15)
 
-        # Video Feed Layout
-        self.video_label = QLabel(self)
-        self.video_label.setFixedSize(640, 480)  # Adjusted resolution for video
+# Placeholders for video, risk, and graphs
+video_placeholder = st.empty()
+risk_placeholder = st.empty()
+graph_placeholder = st.empty()
+heatmap_placeholder = st.empty()
 
-        # Labels for Crowd Density, Movement Speed, and Risk Level
-        self.density_label = QLabel("Crowd Density: 0 people/m²", self)
-        self.movement_label = QLabel("Movement Speed: 0.00", self)
-        self.risk_label = QLabel("Risk Level: LOW", self)
+# Data storage for graphs
+density_data, movement_data, heatmap_data = [], [], []
 
-        # Graph Setup (Rectangular Canvas)
-        self.fig, self.ax = plt.subplots(figsize=(6, 3))  # Make the graph rectangular
-        self.canvas = FigureCanvas(self.fig)
-        self.canvas.setFixedSize(600, 300)  # Fixed size for the graph
+# Alert Sound Function
+pygame.mixer.init()
+try:
+    sound = pygame.mixer.Sound("alert_sound.wav")
+except pygame.error:
+    st.sidebar.warning("⚠️ Alert sound file not found! Please add 'alert_sound.wav'.")
 
-        # Set graph background color to light gray for better contrast
-        self.canvas.setStyleSheet("background-color: lightgray; border-radius: 10px;")
+# Email Alert Function
+def send_email_alert():
+    sender_email = "your_email@gmail.com"  # Replace with actual email
+    receiver_email = "alert_receiver@gmail.com"  # Replace with recipient email
+    password = "your_email_password"  # Replace with actual password (consider using environment variables)
 
-        # Layout setup for the UI
-        layout = QVBoxLayout()
-        video_layout = QVBoxLayout()
-        video_layout.addWidget(self.video_label)
+    msg = MIMEMultipart()
+    msg["From"] = sender_email
+    msg["To"] = receiver_email
+    msg["Subject"] = "⚠️ High-Risk Crowd Alert"
 
-        # Create a layout for labels and graph
-        info_layout = QVBoxLayout()
-        info_layout.addWidget(self.density_label)
-        info_layout.addWidget(self.movement_label)
-        info_layout.addWidget(self.risk_label)
-        info_layout.addWidget(self.canvas)
+    body = "⚠️ High crowd density and movement detected! Immediate action required."
+    msg.attach(MIMEText(body, "plain"))
 
-        # Main layout combining video and info layouts
-        h_layout = QHBoxLayout()
-        h_layout.addLayout(video_layout)
-        h_layout.addLayout(info_layout)
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender_email, password)
+        server.sendmail(sender_email, receiver_email, msg.as_string())
+        server.quit()
+    except Exception as e:
+        st.sidebar.error(f"❌ Email alert failed: {e}")
 
-        self.setLayout(h_layout)
+# Process Video or Webcam
+def process_video(video_source):
+    cap = cv2.VideoCapture(video_source)
+    prev_gray = None
+    alert_played = False
+    frame_count = 0
+    start_time = time.time()  # Track FPS calculation
 
-        # Load YOLOv5 model
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = DetectMultiBackend("yolov5s.pt", device=self.device)
-        self.model.eval()
-
-        # Video Capture
-        self.cap = cv2.VideoCapture(0)
-        self.prev_gray = None
-
-        # Timer for video updates
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_frame)
-        self.timer.start(30)  # 30ms per frame (smooth video)
-
-        # Data for graph
-        self.density_data = []
-        self.movement_data = []
-
-        # Flag to prevent multiple alerts
-        self.alert_triggered = False
-
-    def play_alert_sound(self):
-        if sys.platform == "win32":
-            winsound.Beep(1000, 500)  # Beep with frequency 1000Hz for 500ms (Windows)
-        else:
-            import pygame
-            pygame.mixer.init()
-            sound = pygame.mixer.Sound("alert_sound.wav")  # Use a WAV sound file
-            sound.play()
-
-    def show_alert_message(self):
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setText("High Risk Alert: The crowd density and movement indicate a potential risk!")
-        msg.setWindowTitle("Crowd Risk Alert")
-        msg.exec()
-
-    def update_frame(self):
-        ret, frame = self.cap.read()
+    while cap.isOpened():
+        ret, frame = cap.read()
         if not ret:
-            return
+            break
 
-        # YOLOv5 Processing
-        img = cv2.resize(frame, (640, 640))
-        img = img[:, :, ::-1].transpose(2, 0, 1)
-        img = np.ascontiguousarray(img)
-        img = torch.from_numpy(img).float() / 255.0
-        img = img.unsqueeze(0).to(self.device)
+        frame_count += 1
+        height, width = frame.shape[:2]
+        resized_frame = cv2.resize(frame, (640, 640))
 
+        img = torch.from_numpy(resized_frame).permute(2, 0, 1).float() / 255.0
+        img = img.unsqueeze(0).to(device)
+
+        # YOLO Object Detection
         with torch.no_grad():
-            pred = self.model(img)
-
+            pred = model(img)
         pred = non_max_suppression(pred, conf_thres=0.4, iou_thres=0.5)
-        annotator = Annotator(frame, line_width=2, example="Person Detection")
 
+        annotator = Annotator(frame, line_width=2)
         person_count = 0
+
         for det in pred:
             if det is not None and len(det):
                 det[:, :4] = scale_boxes(img.shape[2:], det[:, :4], frame.shape).round()
                 for *xyxy, conf, cls in det:
-                    if int(cls) == 0:  # Only detect "person"
+                    if int(cls) == 0:  # Detect only "person"
                         annotator.box_label(xyxy, f"Person {conf:.2f}", color=colors(int(cls), True))
                         person_count += 1
 
-        # Calculate Crowd Density
-        frame_area = frame.shape[0] * frame.shape[1]
-        crowd_density = person_count / (frame_area / 1e6)
-        self.density_data.append(crowd_density)
+        # Compute Crowd Density
+        crowd_density = person_count / (height * width / 1e6)
+        density_data.append(crowd_density)
 
-        # Optical Flow for Movement Analysis
+        # Compute Movement Speed
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         movement_score = 0
 
-        if self.prev_gray is not None:
-            flow = cv2.calcOpticalFlowFarneback(self.prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-            mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        if prev_gray is not None:
+            flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+            mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
             movement_score = np.mean(mag)
-            self.movement_data.append(movement_score)
+            movement_data.append(movement_score)
 
-        self.prev_gray = gray
+        prev_gray = gray
 
-        # Risk Assessment
-        risk_level = "LOW"
-        if crowd_density > 3.5:
-            risk_level = "MODERATE"
+        # Determine Risk Level
+        risk_level = "🟢 LOW"
+        if crowd_density > 5.5:
+            risk_level = "🟡 MODERATE"
             if movement_score > 2.0:
-                risk_level = "HIGH"
-                if not self.alert_triggered:
-                    self.play_alert_sound()  # Trigger sound when risk is HIGH
-                    self.show_alert_message()  # Show popup message alert
-                    self.alert_triggered = True
+                risk_level = "🔴 HIGH"
+                if not alert_played and "sound" in locals():
+                    sound.play()
+                    send_email_alert()
+                    alert_played = True
+            else:
+                alert_played = False  # Reset alert if risk reduces
 
-        # Update UI Labels
-        self.density_label.setText(f"Crowd Density: {crowd_density:.2f} people/m²")
-        self.movement_label.setText(f"Movement Speed: {movement_score:.2f}")
-        self.risk_label.setText(f"Risk Level: {risk_level}")
+        # Display FPS
+        elapsed_time = time.time() - start_time
+        fps = frame_count / elapsed_time if elapsed_time > 0 else 0
 
-        # Update Video Feed
+        # Display Risk Level
+        risk_placeholder.markdown(f"""
+        ## 🚦 **Risk Level: {risk_level}**
+        - 👥 **Crowd Density:** {crowd_density:.2f} people/m²  
+        - 🏃 **Movement Speed:** {movement_score:.2f}
+        - 🎥 **FPS:** {fps:.2f}
+        """, unsafe_allow_html=True)
+
+        # Convert Frame to RGB for Streamlit
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = frame.shape
-        qimg = QImage(frame.data, w, h, ch * w, QImage.Format.Format_RGB888)
-        self.video_label.setPixmap(QPixmap.fromImage(qimg))
+        video_placeholder.image(frame, channels="RGB", use_container_width=True)
 
-        # Update Graph
-        self.update_graph()
+        # Generate Real-Time Graph & Heatmap
+        plot_graph()
+        plot_heatmap(movement_score)
 
-    def update_graph(self):
-        self.ax.clear()
-        self.ax.plot(self.density_data, label="Crowd Density", color="blue")
-        self.ax.plot(self.movement_data, label="Movement Intensity", linestyle="dashed", color="red")
-        self.ax.set_title("Crowd Risk Analysis")
-        self.ax.set_xlabel("Time (seconds)")
-        self.ax.set_ylabel("Value")
-        self.ax.legend()
-        self.canvas.draw()  # Redraw graph inside PyQt UI
+        time.sleep(1 / fps_display)
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = CrowdMonitoringApp()
-    window.show()
-    sys.exit(app.exec())
+    cap.release()
+
+# Function to Generate Real-Time Graph
+def plot_graph():
+    fig, ax = plt.subplots(figsize=(6, 3))
+    ax.plot(density_data, label="Crowd Density", color="blue")
+    ax.plot(movement_data, label="Movement Intensity", linestyle="dashed", color="red")
+    ax.set_title("📊 Crowd Risk Analysis")
+    ax.set_xlabel("Time (seconds)")
+    ax.set_ylabel("Value")
+    ax.legend()
+    graph_placeholder.pyplot(fig)
+
+# Function to Generate Heatmap
+def plot_heatmap(movement_score):
+    heatmap_data.append(movement_score)
+    heatmap_matrix = np.expand_dims(heatmap_data, axis=0)
+
+    fig, ax = plt.subplots(figsize=(6, 2))
+    sns.heatmap(heatmap_matrix, cmap="coolwarm", cbar=False, xticklabels=False, yticklabels=False)
+    ax.set_title("🔥 Movement Heatmap")
+    heatmap_placeholder.pyplot(fig)
+
+# Start Processing
+if use_webcam:
+    st.warning("📹 **Using Live Webcam... Press 'Stop' to Exit**")
+    process_video(0)  # Webcam source
+elif uploaded_file is not None:
+    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+        temp_file.write(uploaded_file.read())
+        temp_path = temp_file.name
+    process_video(temp_path)
+
