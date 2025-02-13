@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QMessageBox
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPalette
+from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtCore import QTimer
 import cv2
 import torch
@@ -24,7 +24,7 @@ class CrowdMonitoringApp(QWidget):
 
         # Video Feed Layout
         self.video_label = QLabel(self)
-        self.video_label.setFixedSize(1280, 720)  # Full resolution for video
+        self.video_label.setFixedSize(640, 480)  # Adjusted resolution for video
 
         # Labels for Crowd Density, Movement Speed, and Risk Level
         self.density_label = QLabel("Crowd Density: 0 people/m²", self)
@@ -45,22 +45,16 @@ class CrowdMonitoringApp(QWidget):
         video_layout.addWidget(self.video_label)
 
         # Create a layout for labels and graph
-        corner_layout = QVBoxLayout()
-        corner_layout.addWidget(self.density_label)
-        corner_layout.addWidget(self.movement_label)
-        corner_layout.addWidget(self.risk_label)
+        info_layout = QVBoxLayout()
+        info_layout.addWidget(self.density_label)
+        info_layout.addWidget(self.movement_label)
+        info_layout.addWidget(self.risk_label)
+        info_layout.addWidget(self.canvas)
 
-        # Create a layout for the graph in the corner
-        graph_layout = QVBoxLayout()
-        graph_layout.addWidget(self.canvas)
-
-        # Place the graph and labels layout in a corner
-        corner_layout.addLayout(graph_layout)
-
-        # Main layout combining video and corner layouts
+        # Main layout combining video and info layouts
         h_layout = QHBoxLayout()
         h_layout.addLayout(video_layout)
-        h_layout.addLayout(corner_layout)
+        h_layout.addLayout(info_layout)
 
         self.setLayout(h_layout)
 
