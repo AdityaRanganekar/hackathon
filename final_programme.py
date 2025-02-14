@@ -8,8 +8,8 @@ import pygame
 import smtplib
 import matplotlib.pyplot as plt
 import seaborn as sns
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from twilio.rest import Client
+from twilio.base.exceptions import TwilioRestException
 from yolov5.models.common import DetectMultiBackend
 from yolov5.utils.general import non_max_suppression, scale_boxes
 from yolov5.utils.plots import Annotator, colors
@@ -42,28 +42,31 @@ try:
 except pygame.error:
     st.sidebar.warning("⚠️ Alert sound file not found! Please add 'alert_sound.wav'.")
 
-# Email Alert Function
-def send_email_alert():
-    sender_email = "your_email@gmail.com"  # Replace with actual email
-    receiver_email = "alert_receiver@gmail.com"  # Replace with recipient email
-    password = "your_email_password"  # Replace with actual password (consider using environment variables)
+# Twilio Credentials (Replace with actual credentials from your Twilio Console)
+TWILIO_SID = "AC5154e6eb043c25afa80facaf3b28c94b"
+TWILIO_AUTH_TOKEN = "862a5042cb20e2c5815e6d19a8ed148c"
+TWILIO_PHONE_NUMBER = "+18573672071"
+USER_PHONE_NUMBER = "+919529211812"  # Your personal number (must be verified in Twilio trial)
 
-    msg = MIMEMultipart()
-    msg["From"] = sender_email
-    msg["To"] = receiver_email
-    msg["Subject"] = "⚠️ High-Risk Crowd Alert"
-
-    body = "⚠️ High crowd density and movement detected! Immediate action required."
-    msg.attach(MIMEText(body, "plain"))
-
+# Function to Send SMS Alert
+def send_sms_alert():
     try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(sender_email, password)
-        server.sendmail(sender_email, receiver_email, msg.as_string())
-        server.quit()
-    except Exception as e:
-        st.sidebar.error(f"❌ Email alert failed: {e}")
+        client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
+        
+        message = client.messages.create(
+            body="⚠️ High-Risk Crowd Alert: Immediate action required!",
+            from_=TWILIO_PHONE_NUMBER,
+            to=USER_PHONE_NUMBER
+        )
+        
+        st.sidebar.success(f"📲 SMS Alert Sent! Message SID: {message.sid}")
+    
+    except TwilioRestException as e:
+        st.sidebar.error(f"❌ Twilio Error: {e}")
+
+# Manual SMS Alert Button
+if st.sidebar.button("🚨 Send SMS Alert"):
+    send_sms_alert()
 
 # Process Video or Webcam
 def process_video(video_source):
@@ -125,7 +128,7 @@ def process_video(video_source):
                 risk_level = "🔴 HIGH"
                 if not alert_played and "sound" in locals():
                     sound.play()
-                    send_email_alert()
+                    send_sms_alert()
                     alert_played = True
             else:
                 alert_played = False  # Reset alert if risk reduces
@@ -184,4 +187,5 @@ elif uploaded_file is not None:
         temp_file.write(uploaded_file.read())
         temp_path = temp_file.name
     process_video(temp_path)
+
 
